@@ -21,5 +21,5 @@ while num_11 != 10:
 from scipy.optimize import minimize
 def num_12(x):
     return x**2 - 4*x + 4
-result = minimize(num_12, x0=0)
+result = minimize(num_12, x0=0) #Эту строчку я подсмотрел в интернете
 print(result.x)
