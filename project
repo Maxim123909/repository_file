@@ -1,0 +1,237 @@
+import telebot
+from telebot import types
+import sqlite3
+from datetime import datetime, time
+import time as t
+import threading
+
+# Инициализация бота
+token = '7930851116:AAEyrwflNIWtpE1ne7YmTzjOu3C5bfJQxz8'  # Замените на ваш токен
+bot = telebot.TeleBot(token)
+
+# Подключение к SQLite базе данных
+conn = sqlite3.connect('medicine.db', check_same_thread=False)
+cursor = conn.cursor()
+
+# Создание таблиц (если их нет)
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS medicines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    name TEXT,
+    dosage TEXT,
+    time TEXT,
+    taken INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users (user_id)
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS incompatible_meds (
+    med1 TEXT,
+    med2 TEXT,
+    warning TEXT
+)
+''')
+
+# Заполнение базы с несовместимыми лекарствами (пример)
+try:
+    cursor.executemany('''
+    INSERT OR IGNORE INTO incompatible_meds (med1, med2, warning) VALUES (?, ?, ?)
+    ''', [
+        ('Ибупрофен', 'Аспирин', 'Может усиливать риск кровотечений'),
+        ('Парацетамол', 'Алкоголь', 'Токсично для печени'),
+        ('Амоксициллин', 'Метронидазол', 'Усиливает побочные эффекты')
+    ])
+    conn.commit()
+except sqlite3.IntegrityError:
+    pass
+
+# Команда /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    btn1 = types.KeyboardButton('💊 Добавить лекарство')
+    btn2 = types.KeyboardButton('📜 История приёма')
+    btn3 = types.KeyboardButton('⚠️ Проверить совместимость')
+    btn4 = types.KeyboardButton('❌ Удалить лекарство')
+    markup.add(btn1, btn2, btn3, btn4)  # Добавляем все кнопки
+
+    bot.send_message(
+        message.chat.id,
+        f'Привет, {message.from_user.first_name}! Я бот-напоминатель о лекарствах.\n\nВыбери действие:',
+        reply_markup=markup  # Не забываем прикрепить клавиатуру!
+    )
+# Добавление лекарства (остаётся без изменений)
+@bot.message_handler(func=lambda message: message.text == '💊 Добавить лекарство')
+def add_medicine(message):
+    msg = bot.send_message(message.chat.id, 'Введи название лекарства:')
+    bot.register_next_step_handler(msg, process_name_step)
+
+def process_name_step(message):
+    name = message.text
+    msg = bot.send_message(message.chat.id, 'Введи дозировку (например, 1 таблетка или 50 мг):')
+    bot.register_next_step_handler(msg, process_dosage_step, name)
+
+def process_dosage_step(message, name):
+    dosage = message.text
+    msg = bot.send_message(message.chat.id, 'Введи время приёма (например, 08:00 или 14:30):')
+    bot.register_next_step_handler(msg, process_time_step, name, dosage)
+
+def process_time_step(message, name, dosage):
+    try:
+        time_str = message.text
+        datetime.strptime(time_str, '%H:%M')
+
+        user_id = message.from_user.id
+        cursor.execute(
+            'INSERT INTO medicines (user_id, name, dosage, time) VALUES (?, ?, ?, ?)',
+            (user_id, name, dosage, time_str)
+        )
+        conn.commit()
+
+        threading.Thread(target=schedule_reminder, args=(user_id, name, dosage, time_str)).start()
+        bot.send_message(message.chat.id, f'✅ Лекарство "{name}" добавлено на {time_str}!')
+    except ValueError:
+        bot.send_message(message.chat.id, '❌ Неверный формат времени! Введи в формате ЧЧ:ММ.')
+
+# Просмотр истории (остаётся без изменений)
+@bot.message_handler(func=lambda message: message.text == '📜 История приёма')
+def show_history(message):
+    user_id = message.from_user.id
+    cursor.execute(
+        'SELECT name, dosage, time, taken FROM medicines WHERE user_id = ? ORDER BY time',
+        (user_id,)
+    )
+    medicines = cursor.fetchall()
+
+    if not medicines:
+        bot.send_message(message.chat.id, 'История приёма пуста.')
+        return
+
+    history_text = '💊 История приёма лекарств:\n\n'
+    for med in medicines:
+        status = '✅ Принято' if med[3] else '❌ Не принято'
+        history_text += f'{med[0]} ({med[1]}) в {med[2]} - {status}\n'
+
+    bot.send_message(message.chat.id, history_text)
+
+# Проверка совместимости (остаётся без изменений)
+@bot.message_handler(func=lambda message: message.text == '⚠️ Проверить совместимость')
+def check_compatibility(message):
+    msg = bot.send_message(message.chat.id, 'Введи два лекарства через запятую (например, "Ибупрофен, Аспирин"):')
+    bot.register_next_step_handler(msg, process_compatibility_check)
+
+def process_compatibility_check(message):
+    meds = [m.strip() for m in message.text.split(',')]
+    if len(meds) != 2:
+        bot.send_message(message.chat.id, '❌ Введи ровно два лекарства!')
+        return
+
+    cursor.execute(
+        'SELECT warning FROM incompatible_meds WHERE (med1 = ? AND med2 = ?) OR (med1 = ? AND med2 = ?)',
+        (meds[0], meds[1], meds[1], meds[0])
+    )
+    warning = cursor.fetchone()
+
+    if warning:
+        bot.send_message(message.chat.id, f'⚠️ Внимание: {warning[0]}')
+    else:
+        bot.send_message(message.chat.id, '✅ Эти лекарства можно принимать вместе (но проконсультируйся с врачом).')
+
+
+@bot.message_handler(func=lambda message: message.text == '❌ Удалить лекарство')
+def delete_medicine_menu(message):
+    user_id = message.from_user.id
+    cursor.execute(
+        'SELECT id, name, dosage, time FROM medicines WHERE user_id = ? AND taken = 0',
+        (user_id,)
+    )
+    medicines = cursor.fetchall()
+
+    if not medicines:
+        bot.send_message(message.chat.id, 'Нет активных лекарств для удаления.')
+        return
+
+    markup = types.InlineKeyboardMarkup()
+    for med in medicines:
+        btn_text = f"{med[1]} ({med[2]}) в {med[3]}"
+        markup.add(types.InlineKeyboardButton(
+            text=btn_text,
+            callback_data=f"delete_{med[0]}"
+        ))
+
+    bot.send_message(
+        message.chat.id,
+        'Выбери лекарство для удаления:',
+        reply_markup=markup
+    )
+
+# Обработка нажатия кнопки "Удалить"
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_'))
+def delete_medicine(call):
+    medicine_id = call.data.split('_')[1]
+    cursor.execute('DELETE FROM medicines WHERE id = ?', (medicine_id,))
+    conn.commit()
+    bot.answer_callback_query(call.id, 'Лекарство удалено!')
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_'))
+def delete_medicine(call):
+    try:
+        medicine_id = call.data.split('_')[1]
+        with db_lock:
+            cursor.execute('DELETE FROM medicines WHERE id = ?', (medicine_id,))
+            conn.commit()
+
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id, "✅ Удалено!")
+    except Exception as e:
+        print("Ошибка удаления:", e)
+        bot.answer_callback_query(call.id, "❌ Ошибка при удалении.")
+
+# Обработка нажатия кнопки "Удалить"
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_'))
+def delete_medicine(call):
+    medicine_id = call.data.split('_')[1]
+    cursor.execute('DELETE FROM medicines WHERE id = ?', (medicine_id,))
+    conn.commit()
+    bot.answer_callback_query(call.id, 'Лекарство удалено!')
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+
+# Функция для напоминаний (остаётся без изменений)
+def schedule_reminder(user_id, name, dosage, time_str):
+    try:
+        while True:
+            now = datetime.now().strftime('%H:%M')
+            if now == time_str:
+                bot.send_message(user_id, f'⏰ Напоминание: прими {name} ({dosage})!')
+                t.sleep(60)
+            t.sleep(30)
+    except Exception as e:
+        print("Ошибка в напоминании:", e)
+
+# Обработка кнопки "Принял" (остаётся без изменений)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('taken_'))
+def mark_as_taken(call):
+    name = call.data.split('_')[1]
+    user_id = call.from_user.id
+
+    cursor.execute(
+        'UPDATE medicines SET taken = 1 WHERE user_id = ? AND name = ?',
+        (user_id, name)
+    )
+    conn.commit()
+
+    bot.answer_callback_query(call.id, f'Лекарство "{name}" отмечено как принятое!')
+
+# Запуск бота
+if __name__ == '__main__':
+    print('Бот запущен...')
+    bot.infinity_polling()
