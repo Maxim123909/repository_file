@@ -5,15 +5,13 @@ from datetime import datetime, time
 import time as t
 import threading
 
-# Инициализация бота
-token = '7930851116:AAEyrwflNIWtpE1ne7YmTzjOu3C5bfJQxz8'  # Замените на ваш токен
+token = '' 
 bot = telebot.TeleBot(token)
 
-# Подключение к SQLite базе данных
+
 conn = sqlite3.connect('medicine.db', check_same_thread=False)
 cursor = conn.cursor()
 
-# Создание таблиц (если их нет)
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -41,7 +39,7 @@ CREATE TABLE IF NOT EXISTS incompatible_meds (
 )
 ''')
 
-# Заполнение базы с несовместимыми лекарствами (пример)
+
 try:
     cursor.executemany('''
     INSERT OR IGNORE INTO incompatible_meds (med1, med2, warning) VALUES (?, ?, ?)
